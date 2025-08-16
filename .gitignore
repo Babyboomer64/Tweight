@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Flutter/Dart
+.dart_tool/
+.packages
+.flutter-plugins
+.flutter-plugins-dependencies
+.melos_tool/
+build/
+pubspec.lock
+
+# Android
+**/android/.gradle/
+**/android/local.properties
+**/android/app/build/
+
+# iOS
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/ephemeral/
+
+# Node (falls Tools/Skripte)
+node_modules/
+npm-debug.log*
+yarn.lock
+
+# Logs
+*.log
