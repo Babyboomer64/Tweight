@@ -20,6 +20,9 @@ class ItemsPage extends StatefulWidget {
 }
 
 class _ItemsPageState extends State<ItemsPage> {
+  /// Transient UI state: expanded/collapsed per item id (not persisted)
+  final Map<String, bool> _expanded = <String, bool>{};
+
   static const String kRootId = "_root";
 
   late final AppDatabase db;
@@ -67,6 +70,10 @@ class _ItemsPageState extends State<ItemsPage> {
     final rows = await db.listActiveItems();
     _items = rows;
     await _ensureRoot();
+    // default expanded = true for any items we haven't seen yet
+    for (final it in _items) {
+      _expanded.putIfAbsent(it.id, () => true);
+    }
     setState(() {
       _loading = false;
     });
@@ -217,6 +224,9 @@ class _ItemsPageState extends State<ItemsPage> {
       if (_matchesQuery(top) || _subtreeMatches(top.id, byId)) {
         void dfs(Item n) {
           out.add(n);
+          // stop traversing this branch if collapsed
+          final isExp = _expanded[n.id] ?? true;
+          if (!isExp) return;
           for (final ch in _childrenOf(n.id, byId)) {
             if (_matchesQuery(ch) || _subtreeMatches(ch.id, byId)) {
               dfs(ch);
@@ -270,6 +280,7 @@ class _ItemsPageState extends State<ItemsPage> {
       {'type': 'parent', 'target': kRootId, 'rank': rank}
     ]);
 
+    _expanded[id] = true;
     await db.createItem(
       id: id,
       ownerId: 'owner-local',
@@ -523,6 +534,24 @@ class _ItemsPageState extends State<ItemsPage> {
                               child: Icon(Icons.subdirectory_arrow_right,
                                   size: 16, color: Colors.grey.shade600),
                             ),
+                          // expand/collapse chevron if item has children
+                          Builder(builder: (context) {
+                            final hasChildren = _childrenOf(it.id, byId).isNotEmpty;
+                            final isExp = _expanded[it.id] ?? true;
+                            return hasChildren
+                                ? IconButton(
+                                    onPressed: () {
+                                      setState(() {
+                                        _expanded[it.id] = !isExp;
+                                      });
+                                    },
+                                    iconSize: 20,
+                                    padding: const EdgeInsets.all(0),
+                                    constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                                    icon: Icon(isExp ? Icons.expand_more : Icons.chevron_right),
+                                  )
+                                : const SizedBox(width: 28);
+                          }),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
