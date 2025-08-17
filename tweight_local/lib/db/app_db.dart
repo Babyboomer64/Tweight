@@ -180,6 +180,72 @@ class AppDatabase extends _$AppDatabase {
       ));
     });
   }
+  /// Soft delete many items in one transaction + history for each
+  Future<void> softDeleteMany({required List<String> ids, DateTime? now}) async {
+    if (ids.isEmpty) return;
+    final ts = now ?? DateTime.now();
+    final uniq = ids.toSet().toList(); // avoid duplicate work
+    await transaction(() async {
+      for (final id in uniq) {
+        final current = await (select(items)..where((t) => t.id.equals(id))).getSingle();
+        final nextVersion = current.rowVersion + 1;
+        if (current.isDeleted == true) {
+          // Already deleted: still write a history entry to be explicit? We keep idempotent and skip.
+          continue;
+        }
+        await (update(items)..where((t) => t.id.equals(id))).write(ItemsCompanion(
+          isDeleted: const Value(true),
+          rowVersion: Value(nextVersion),
+          updatedAt: Value(ts),
+        ));
+        final after = await (select(items)..where((t) => t.id.equals(id))).getSingle();
+        await into(itemHistory).insert(ItemHistoryCompanion.insert(
+          historyId: _uuidLike(),
+          itemId: id,
+          version: nextVersion,
+          changedAt: ts,
+          changedBy: const Value(null),
+          changeType: 'delete',
+          snapshotJson: _snapshotFromRow(after),
+          diffJson: const Value(null),
+        ));
+      }
+    });
+  }
+
+  /// Restore many soft-deleted items in one transaction + history for each
+  Future<void> restoreMany({required List<String> ids, DateTime? now}) async {
+    if (ids.isEmpty) return;
+    final ts = now ?? DateTime.now();
+    final uniq = ids.toSet().toList(); // avoid duplicate work
+    await transaction(() async {
+      for (final id in uniq) {
+        final current = await (select(items)..where((t) => t.id.equals(id))).getSingle();
+        final nextVersion = current.rowVersion + 1;
+        if (current.isDeleted == false) {
+          // Not deleted: skip to remain idempotent
+          continue;
+        }
+        await (update(items)..where((t) => t.id.equals(id))).write(ItemsCompanion(
+          isDeleted: const Value(false),
+          rowVersion: Value(nextVersion),
+          updatedAt: Value(ts),
+        ));
+        final after = await (select(items)..where((t) => t.id.equals(id))).getSingle();
+        await into(itemHistory).insert(ItemHistoryCompanion.insert(
+          historyId: _uuidLike(),
+          itemId: id,
+          version: nextVersion,
+          changedAt: ts,
+          changedBy: const Value(null),
+          changeType: 'restore',
+          snapshotJson: _snapshotFromRow(after),
+          diffJson: const Value(null),
+        ));
+      }
+    });
+  }
+
 }
 
 /// Open a persistent SQLite database using drift_sqflite.

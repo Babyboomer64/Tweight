@@ -26,6 +26,10 @@ class _ItemsPageState extends State<ItemsPage> {
   bool _loading = true;
   List<Item> _items = [];
 
+  // transient UI state: collapsed nodes (default expanded)
+  final Set<String> _collapsed = <String>{};
+
+
   final TextEditingController _searchCtrl = TextEditingController();
   String _query = '';
 
@@ -134,6 +138,19 @@ class _ItemsPageState extends State<ItemsPage> {
   }
 
   // ---------- TREE HELPERS ----------
+
+  bool _isExpanded(String id) => !_collapsed.contains(id);
+  void _toggleExpanded(String id) {
+    setState(() {
+      if (_collapsed.contains(id)) {
+        _collapsed.remove(id);
+      } else {
+        _collapsed.add(id);
+      }
+    });
+  }
+  bool _hasChildren(String id, Map<String, Item> byId) => _childrenOf(id, byId).isNotEmpty;
+
   int _cmpNullableDouble(double? a, double? b) {
     if (a == null && b == null) return 0;
     if (a == null) return 1; // nulls last
@@ -217,6 +234,7 @@ class _ItemsPageState extends State<ItemsPage> {
       if (_matchesQuery(top) || _subtreeMatches(top.id, byId)) {
         void dfs(Item n) {
           out.add(n);
+          if (!_isExpanded(n.id)) return;
           for (final ch in _childrenOf(n.id, byId)) {
             if (_matchesQuery(ch) || _subtreeMatches(ch.id, byId)) {
               dfs(ch);
@@ -535,6 +553,18 @@ class _ItemsPageState extends State<ItemsPage> {
                               padding: const EdgeInsets.only(right: 6),
                               child: Icon(Icons.subdirectory_arrow_right,
                                   size: 16, color: Colors.grey.shade600),
+                            ),
+                          if (_hasChildren(it.id, byId))
+                            Padding(
+                              padding: const EdgeInsets.only(right: 4),
+                              child: InkWell(
+                                onTap: () => _toggleExpanded(it.id),
+                                child: Icon(
+                                  _isExpanded(it.id) ? Icons.expand_more : Icons.chevron_right,
+                                  size: 20,
+                                  color: Colors.grey.shade700,
+                                ),
+                              ),
                             ),
                           Expanded(
                             child: Column(
