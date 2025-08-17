@@ -20,9 +20,6 @@ class ItemsPage extends StatefulWidget {
 }
 
 class _ItemsPageState extends State<ItemsPage> {
-  /// Transient UI state: expanded/collapsed per item id (not persisted)
-  final Map<String, bool> _expanded = <String, bool>{};
-
   static const String kRootId = "_root";
 
   late final AppDatabase db;
@@ -70,10 +67,6 @@ class _ItemsPageState extends State<ItemsPage> {
     final rows = await db.listActiveItems();
     _items = rows;
     await _ensureRoot();
-    // default expanded = true for any items we haven't seen yet
-    for (final it in _items) {
-      _expanded.putIfAbsent(it.id, () => true);
-    }
     setState(() {
       _loading = false;
     });
@@ -224,9 +217,6 @@ class _ItemsPageState extends State<ItemsPage> {
       if (_matchesQuery(top) || _subtreeMatches(top.id, byId)) {
         void dfs(Item n) {
           out.add(n);
-          // stop traversing this branch if collapsed
-          final isExp = _expanded[n.id] ?? true;
-          if (!isExp) return;
           for (final ch in _childrenOf(n.id, byId)) {
             if (_matchesQuery(ch) || _subtreeMatches(ch.id, byId)) {
               dfs(ch);
@@ -239,7 +229,20 @@ class _ItemsPageState extends State<ItemsPage> {
     return out;
   }
 
-  // ---------- CRUD ----------
+  
+  /// Collect IDs for a node and all its descendants (including rootId itself).
+  List<String> _collectSubtreeIds(String rootId, Map<String, Item> byId) {
+    final result = <String>[];
+    void dfs(String id) {
+      result.add(id);
+      for (final ch in _childrenOf(id, byId)) {
+        dfs(ch.id);
+      }
+    }
+    dfs(rootId);
+    return result;
+  }
+// ---------- CRUD ----------
   Future<void> _createItemDialog() async {
     final labelCtrl = TextEditingController();
     final contentCtrl = TextEditingController();
@@ -280,7 +283,6 @@ class _ItemsPageState extends State<ItemsPage> {
       {'type': 'parent', 'target': kRootId, 'rank': rank}
     ]);
 
-    _expanded[id] = true;
     await db.createItem(
       id: id,
       ownerId: 'owner-local',
@@ -534,24 +536,6 @@ class _ItemsPageState extends State<ItemsPage> {
                               child: Icon(Icons.subdirectory_arrow_right,
                                   size: 16, color: Colors.grey.shade600),
                             ),
-                          // expand/collapse chevron if item has children
-                          Builder(builder: (context) {
-                            final hasChildren = _childrenOf(it.id, byId).isNotEmpty;
-                            final isExp = _expanded[it.id] ?? true;
-                            return hasChildren
-                                ? IconButton(
-                                    onPressed: () {
-                                      setState(() {
-                                        _expanded[it.id] = !isExp;
-                                      });
-                                    },
-                                    iconSize: 20,
-                                    padding: const EdgeInsets.all(0),
-                                    constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                                    icon: Icon(isExp ? Icons.expand_more : Icons.chevron_right),
-                                  )
-                                : const SizedBox(width: 28);
-                          }),
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -609,7 +593,49 @@ class _ItemsPageState extends State<ItemsPage> {
                       builder: (context, cand, rej) => row,
                     );
 
-                    return LongPressDraggable<String>(
+                    return Dismissible(
+                      key: ValueKey('dismiss-'+it.id),
+                      direction: _activeDragId == null ? DismissDirection.horizontal : DismissDirection.none,
+                      background: Container(
+                        alignment: Alignment.centerLeft,
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        color: Colors.redAccent.withOpacity(0.12),
+                        child: const Row(children: [Icon(Icons.delete), SizedBox(width:8), Text('Delete')]),
+                      ),
+                      secondaryBackground: Container(
+                        alignment: Alignment.centerRight,
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        color: Colors.redAccent.withOpacity(0.12),
+                        child: const Row(mainAxisAlignment: MainAxisAlignment.end, children: [Text('Delete'), SizedBox(width:8), Icon(Icons.delete)]),
+                      ),
+                      confirmDismiss: (dir) async {
+                        // prevent accidental delete of root placeholder (not visible anyway)
+                        if (it.id == kRootId) return false;
+                        return true;
+                      },
+                      onDismissed: (dir) async {
+                        final byId = {for (final e in _items) e.id: e};
+                        final ids = _collectSubtreeIds(it.id, byId);
+                        final deletedIds = List<String>.from(ids);
+                        await db.softDeleteMany(ids: ids);
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Deleted ${ids.length} item(s).'),
+                              action: SnackBarAction(label: 'Undo', onPressed: () async {
+                                if (deletedIds.isNotEmpty) {
+                                  await db.restoreMany(ids: deletedIds);
+                                  await _load();
+                                }
+                              }),
+                              duration: const Duration(seconds: 5),
+                            ),
+                          );
+                        }
+                        await _load();
+                      },
+                      child: LongPressDraggable<String>(
                       data: it.id,
                       dragAnchorStrategy: pointerDragAnchorStrategy,
                       feedback: Material(
@@ -662,7 +688,7 @@ class _ItemsPageState extends State<ItemsPage> {
                         }
                       },
                       child: target,
-                    );
+                    ));
                   },
                 ),
     );
