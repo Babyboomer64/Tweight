@@ -26,10 +26,6 @@ class _ItemsPageState extends State<ItemsPage> {
   bool _loading = true;
   List<Item> _items = [];
 
-  // transient UI state: collapsed nodes (default expanded)
-  final Set<String> _collapsed = <String>{};
-
-
   final TextEditingController _searchCtrl = TextEditingController();
   String _query = '';
 
@@ -39,6 +35,27 @@ class _ItemsPageState extends State<ItemsPage> {
 
   // vertical DnD (drop highlight)
   String? _hoverTargetId;
+
+  // --- Expand/Collapse (transient UI state) ---
+  final Set<String> _collapsed = <String>{};
+  bool _isExpanded(String id) => !_collapsed.contains(id);
+  void _toggleExpanded(String id) {
+    setState(() {
+      if (_collapsed.contains(id)) {
+        _collapsed.remove(id);
+      } else {
+        _collapsed.add(id);
+      }
+    });
+  }
+  bool _hasChildrenSimple(String id) {
+    final byId = {for (final it in _items) it.id: it};
+    for (final x in _items) {
+      final p = _parentOf(x);
+      if (p != null && p.id == id && x.id != kRootId) return true;
+    }
+    return false;
+  }
 
   @override
   void initState() {
@@ -138,19 +155,6 @@ class _ItemsPageState extends State<ItemsPage> {
   }
 
   // ---------- TREE HELPERS ----------
-
-  bool _isExpanded(String id) => !_collapsed.contains(id);
-  void _toggleExpanded(String id) {
-    setState(() {
-      if (_collapsed.contains(id)) {
-        _collapsed.remove(id);
-      } else {
-        _collapsed.add(id);
-      }
-    });
-  }
-  bool _hasChildren(String id, Map<String, Item> byId) => _childrenOf(id, byId).isNotEmpty;
-
   int _cmpNullableDouble(double? a, double? b) {
     if (a == null && b == null) return 0;
     if (a == null) return 1; // nulls last
@@ -260,6 +264,22 @@ class _ItemsPageState extends State<ItemsPage> {
     dfs(rootId);
     return result;
   }
+  // ---------- IMPORT FROM TEXT (entry point) ----------
+  void _openImportFromTextDialog([BuildContext? dialogContext]) {
+    final ctx = dialogContext ?? context;
+    showDialog(
+      context: ctx,
+      barrierDismissible: true,
+      builder: (dCtx) => _ImportFromTextDialog(
+        db: db,
+        rootId: kRootId,
+        onImported: () async {
+          await _load(); // refresh list after import
+        },
+      ),
+    );
+  }
+
 // ---------- CRUD ----------
   Future<void> _createItemDialog() async {
     final labelCtrl = TextEditingController();
@@ -499,6 +519,13 @@ class _ItemsPageState extends State<ItemsPage> {
             ),
           ),
         ),
+        actions: [
+          IconButton(
+            tooltip: 'Import from text',
+            icon: const Icon(Icons.note_add),
+            onPressed: _openImportFromTextDialog,
+          ),
+        ],
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: _createItemDialog,
@@ -554,18 +581,17 @@ class _ItemsPageState extends State<ItemsPage> {
                               child: Icon(Icons.subdirectory_arrow_right,
                                   size: 16, color: Colors.grey.shade600),
                             ),
-                          if (_hasChildren(it.id, byId))
-                            Padding(
-                              padding: const EdgeInsets.only(right: 4),
-                              child: InkWell(
-                                onTap: () => _toggleExpanded(it.id),
-                                child: Icon(
-                                  _isExpanded(it.id) ? Icons.expand_more : Icons.chevron_right,
-                                  size: 20,
-                                  color: Colors.grey.shade700,
-                                ),
+                          if (_hasChildrenSimple(it.id)) ...[
+                            InkWell(
+                              onTap: () => _toggleExpanded(it.id),
+                              child: Icon(
+                                _isExpanded(it.id) ? Icons.expand_more : Icons.chevron_right,
+                                size: 18,
+                                color: Colors.grey.shade700,
                               ),
                             ),
+                            const SizedBox(width: 6),
+                          ],
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
@@ -721,6 +747,334 @@ class _ItemsPageState extends State<ItemsPage> {
                     ));
                   },
                 ),
+    );
+  }
+}
+
+// === Import from text: parser + dialog ===
+
+class _ParsedNode {
+  final int depth;
+  final String label;
+  const _ParsedNode(this.depth, this.label);
+}
+
+// Right-strip without trimming leading indentation
+extension _RStrip on String {
+  String rstrip() {
+    var s = this;
+    while (s.isNotEmpty) {
+      final last = s.codeUnitAt(s.length - 1);
+      if (last == 0x20 || last == 0x09 || last == 0x0D) { // space, tab, CR
+        s = s.substring(0, s.length - 1);
+      } else {
+        break;
+      }
+    }
+    return s;
+  }
+}
+
+/// Parses plain text into (depth,label) nodes.
+/// - Tabs normalized to 4 spaces.
+/// - Strips leading checkbox/list markers: - [ ], * [ ], • [ ], [ ], -, *, •, 1., 2), ...
+/// - Skips blank lines.
+List<_ParsedNode> _parsePlainTextHierarchy(String input, {int tabSize = 4}) {
+  final lines = input.split('\n');
+  final nodes = <_ParsedNode>[];
+
+  final checkbox = RegExp(r'^\s*(?:[-*•]\s*\[[ xX]\]\s*|\[\s*\]\s*)');
+  final simpleList = RegExp(r'^\s*(?:[-*•]\s+|\d+[\.\)]\s+)');
+
+  for (var raw in lines) {
+    if (raw.trimRight().isEmpty) continue;
+    final line = raw.rstrip();
+
+    // measure leading whitespace, normalize tabs
+    int depthSpaces = 0;
+    for (int i = 0; i < line.length; i++) {
+      final ch = line[i];
+      if (ch == ' ') {
+        depthSpaces += 1;
+      } else if (ch == '\t') {
+        depthSpaces += tabSize;
+      } else {
+        break;
+      }
+    }
+    final depth = depthSpaces ~/ tabSize;
+    String rest = line.substring(depthSpaces);
+
+    // strip list-like tokens
+    rest = rest.replaceFirst(checkbox, '');
+    rest = rest.replaceFirst(simpleList, '');
+
+    rest = rest.trim();
+    if (rest.isEmpty) continue;
+
+    nodes.add(_ParsedNode(depth, rest));
+  }
+  return nodes;
+}
+
+/// Lightweight parent parser to read parentId/rank from relationsJson.
+class _ParentMini {
+  final String id;
+  final double? rank;
+  const _ParentMini(this.id, this.rank);
+}
+
+_ParentMini? _parseParentMini(String relationsJson) {
+  try {
+    final list = (jsonDecode(relationsJson) as List).cast<dynamic>();
+    for (final e in list) {
+      if (e is Map && e['type'] == 'parent' && e['target'] is String) {
+        final id = e['target'] as String;
+        final r = e['rank'];
+        final rank = (r is num) ? r.toDouble() : null;
+        return _ParentMini(id, rank);
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+class _ImportFromTextDialog extends StatefulWidget {
+  final AppDatabase db;
+  final String rootId;
+  final Future<void> Function() onImported;
+  const _ImportFromTextDialog({
+    required this.db,
+    required this.rootId,
+    required this.onImported,
+  });
+
+  @override
+  State<_ImportFromTextDialog> createState() => _ImportFromTextDialogState();
+}
+
+class _ImportFromTextDialogState extends State<_ImportFromTextDialog> {
+  final _controller = TextEditingController();
+  List<_ParsedNode> _preview = const [];
+  String? _error;
+  String? _selectedParentId; // null => root
+  bool _busy = false;
+  static const _maxLines = 5000;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _buildPreview() {
+    final text = _controller.text;
+    final nodes = _parsePlainTextHierarchy(text);
+    setState(() {
+      _preview = nodes;
+      _error = nodes.isEmpty ? 'Nothing to import. Paste some text first.' : null;
+    });
+  }
+
+  Future<void> _createItems() async {
+    final nodes = _preview;
+    if (nodes.isEmpty) {
+      setState(() => _error = 'Parsing produced 0 items. Nothing to import.');
+      return;
+    }
+    if (nodes.length > _maxLines) {
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Large import'),
+          content: Text('You are importing ${nodes.length} lines. Continue?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            ElevatedButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Continue')),
+          ],
+        ),
+      );
+      if (proceed != true) return;
+    }
+
+    setState(() { _busy = true; _error = null; });
+    final createdIds = <String>[];
+
+    try {
+      await widget.db.transaction(() async {
+        // Preload all items to compute current max rank per parent
+        final all = await widget.db.listActiveItems();
+        final maxRankByParent = <String, double>{};
+        for (final it in all) {
+          final p = _parseParentMini(it.relationsJson);
+          if (p == null || p.id.isEmpty) continue;
+          final cur = maxRankByParent[p.id] ?? -1e9;
+          if (p.rank != null && p.rank! > cur) {
+            maxRankByParent[p.id] = p.rank!;
+          }
+        }
+
+        final lastByDepth = <int, String?>{};
+        lastByDepth[-1] = _selectedParentId ?? widget.rootId;
+
+        for (final node in nodes) {
+          final now = DateTime.now();
+          final id = now.microsecondsSinceEpoch.toString();
+          final parentId = (node.depth == 0 ? (_selectedParentId ?? widget.rootId) : lastByDepth[node.depth - 1]) ?? widget.rootId;
+
+          // rank: append after existing children
+          final base = maxRankByParent[parentId] ?? -1.0;
+          final rank = base + 1.0;
+          maxRankByParent[parentId] = rank;
+
+          final relationsJson = jsonEncode([
+            {'type': 'parent', 'target': parentId, 'rank': rank}
+          ]);
+
+          await widget.db.createItem(
+            id: id,
+            ownerId: 'owner-local',
+            label: node.label,
+            content: '',
+            tagsJson: jsonEncode(<String>[]),
+            relationsJson: relationsJson,
+          );
+          createdIds.add(id);
+
+          // track for subsequent children
+          lastByDepth[node.depth] = id;
+          // clear deeper depths
+          final keys = List<int>.from(lastByDepth.keys.whereType<int>());
+          for (final k in keys) {
+            if (k > node.depth) lastByDepth.remove(k);
+          }
+        }
+      });
+
+      if (!mounted) return;
+      await widget.onImported();
+      Navigator.pop(context);
+    } catch (e) {
+      setState(() {
+        _busy = false;
+        _error = 'Import failed: $e';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 600),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text('Import from text', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 12),
+                FutureBuilder<List<Item>>(
+                  future: widget.db.listActiveItems(),
+                  builder: (ctx, snap) {
+                    final items = snap.data ?? [];
+                    final dropdownItems = <DropdownMenuItem<String?>>[
+                      const DropdownMenuItem(value: null, child: Text('Root (no parent)')),
+                      ...items
+                          .where((it) => it.id != widget.rootId)
+                          .map((it) => DropdownMenuItem(value: it.id, child: Text(it.label)))
+                          .toList(),
+                    ];
+                    return Row(
+                      children: [
+                        const Text('Target parent: '),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: DropdownButton<String?>(
+                            isExpanded: true,
+                            value: _selectedParentId,
+                            items: dropdownItems,
+                            onChanged: (v) => setState(() => _selectedParentId = v),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _controller,
+                  decoration: const InputDecoration(
+                    hintText: 'Paste your note here...',
+                    border: OutlineInputBorder(),
+                  ),
+                  minLines: 6,
+                  maxLines: 12,
+                  onChanged: (_) => setState(() => _error = null),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: _buildPreview,
+                      icon: const Icon(Icons.visibility),
+                      label: const Text('Preview'),
+                    ),
+                    const SizedBox(width: 12),
+                    if (_busy) const Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 12),
+                      child: SizedBox(height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2)),
+                    ),
+                    const Spacer(),
+                    ElevatedButton.icon(
+                      onPressed: _preview.isNotEmpty && !_busy ? _createItems : null,
+                      icon: const Icon(Icons.playlist_add),
+                      label: const Text('Create items'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                if (_error != null)
+                  Align(alignment: Alignment.centerLeft, child: Text(_error!, style: TextStyle(color: Colors.red))),
+                if (_preview.isNotEmpty)
+                  Container(
+                    margin: const EdgeInsets.only(top: 8),
+                    constraints: const BoxConstraints(maxHeight: 260),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: _preview.length,
+                      itemBuilder: (ctx, i) {
+                        final n = _preview[i];
+                        return Padding(
+                          padding: EdgeInsets.only(left: (n.depth * 16).toDouble()),
+                          child: Row(
+                            children: [
+                              if (n.depth > 0) const Icon(Icons.subdirectory_arrow_right, size: 14),
+                              const SizedBox(width: 4),
+                              Expanded(child: Text(n.label, overflow: TextOverflow.ellipsis)),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    child: const Text('Close'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
